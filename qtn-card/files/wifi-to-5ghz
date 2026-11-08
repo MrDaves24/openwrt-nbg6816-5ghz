@@ -2,9 +2,11 @@
 # Once per boot, move the 2.4 GHz clients onto 5 GHz. 2.4 GHz is on air about 20 s after boot, the
 # 5 GHz card about 34 s plus its 60 s radar check, so every client joins 2.4 GHz first and, with one
 # SSID on both bands, stays there. One disconnect, with no ban, makes them choose again: they pick
-# 5 GHz, and one that hears it badly comes back.
+# 5 GHz, and one that hears it badly comes back. qtn-card set runs it too, after a change that drops
+# the 5 GHz clients, with a shorter wait: it can't be shorter than the card's radar check, or the
+# clients it moves find no 5 GHz network and return to 2.4 GHz.
 
-sleep 180
+sleep "${1:-180}"
 [ "$(cat /sys/class/net/host0/carrier 2>/dev/null)" = 1 ] || {
 	logger -t wifi-to-5ghz "no 5 GHz card on air (host0 has no carrier), 2.4 GHz clients left where they are"
 	exit 0

@@ -89,6 +89,11 @@ SSID on both bands it has no reason to move. `wifi-to-5ghz` disconnects every 2.
 three minutes after boot, if `host0` is up: they choose again, and take 5 GHz where they hear it.
 One that hears it badly comes back to 2.4 GHz.
 
+A change of the 5 GHz network does the same thing to its clients: the card's hostapd reloads, they
+drop, land on 2.4 GHz and stay. So `qtn-card set`, which the LuCI page uses too, runs the same move
+90 seconds after such a change, long enough for the card's radar check; sooner, the clients find no
+5 GHz network yet and go back to 2.4 GHz.
+
 ## Limits
 
 - The driver can't be reloaded. Unloading it resets the card, its PCIe link drops, and the
@@ -101,6 +106,9 @@ One that hears it badly comes back to 2.4 GHz.
 - The card's `iwconfig` reports 0 dBm whatever the power: `call_qcsapi get_tx_power wifi0
   <channel>` gives the real one.
 - The radar check delays 5 GHz by a minute at every boot on the upper channels.
+- The card's `rfenable 1` copies its default `hostapd.conf` over the one on its flash, which erases
+  your SSID and key. `qtn-card set` turns the radio on without it, and keeps it off across boots with
+  the card's `start_down` setting.
 - What's proven, on one unit used as an access point: the card booting and serving clients, both
   radios at once, reboots with the driver loaded at boot. Not tried: a router in its default
   routing mode. Not measured: throughput, both radios under load, weeks of uptime.

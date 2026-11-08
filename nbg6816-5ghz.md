@@ -58,6 +58,17 @@ make package/qdpc-host/compile package/qtn-card/compile
 They land in `bin/targets/ipq806x/generic/packages/kmod-qdpc-host-*.apk` and
 `bin/packages/*/nbg6816_5ghz/qtn-card-*.apk`.
 
+If your router has LuCI and you want a page for the card in it, build a third package, which lands
+beside `qtn-card`, and copy and install it with the others in step 3:
+
+```sh
+./scripts/feeds update luci
+./scripts/feeds install -p nbg6816_5ghz -a
+echo CONFIG_PACKAGE_luci-app-qtn-card=m >>.config
+make defconfig
+make package/luci-app-qtn-card/compile
+```
+
 If you build your own images, you can instead set both lines to `=y` before building the image:
 the packages are then in it, and stay through every `sysupgrade`. In step 3, only the card system
 is copied then, and there is no `apk add`.
@@ -109,17 +120,29 @@ The card keeps the network settings your stock firmware last gave it, in its own
 have your stock 5 GHz network back as it was. `qtn-card` says whether its SSID and key are the
 same as your 2.4 GHz network's (it never prints them).
 
-To change them:
+To change them, give `qtn-card set` the lines you want, any of them:
 
 ```sh
-qtn-card run 'call_qcsapi set_ssid wifi0 "My network"'
-qtn-card run 'call_qcsapi set_passphrase wifi0 0 "my passphrase"'
-qtn-card run 'update_wifi_config wifi0 channel 36'
+printf '%s\n' 'ssid=My network' 'key=my passphrase' channel=36 | qtn-card set
 ```
 
-The card writes them to its flash; they take effect at the router's next boot (`reboot`). A
-channel of `0` lets the card choose. The card stays in the EU's regulatory domain whatever you
-set: it can't be changed.
+SSIDs are 1 to 32 printable ASCII characters and keys 8 to 63. A channel of `0` lets the card
+choose. Changes apply at once and the card keeps them in its flash. They drop the 5 GHz clients,
+and about 90 seconds later the router moves them back from 2.4 GHz. The card stays in the EU's
+regulatory domain whatever you set: it can't be changed.
+
+To turn the radio off, and on again:
+
+```sh
+echo radio=off | qtn-card set
+echo radio=on | qtn-card set
+```
+
+It stays off across reboots until you turn it on. Don't run the card's own `rfenable 1`: it
+replaces your network's SSID and key with the card system's defaults.
+
+If you installed the third package, LuCI has all of this under **Network → 5 GHz**, with the card's
+state. The page takes about 12 seconds to load, because the router logs into the card to read it.
 
 The router disconnects its 2.4 GHz clients once, three minutes after each boot, so that clients
 of a network with one SSID on both bands choose again and take 5 GHz where they hear it. To turn
@@ -127,7 +150,7 @@ that off: `/etc/init.d/wifi-to-5ghz disable`, again after each install of the pa
 
 ## After a sysupgrade
 
-`sysupgrade` keeps the card system and the card's password, not the packages: install the two
+`sysupgrade` keeps the card system and the card's password, not the packages: install the
 packages built with the new image (step 3's `apk add`, then `reboot`). The card keeps its hook and
 its settings in its own flash: nothing to do on the card again. A `sysupgrade -n` or a reset keeps
 neither file: copy the card system again (step 3), and `qtn-card install` asks for the password.

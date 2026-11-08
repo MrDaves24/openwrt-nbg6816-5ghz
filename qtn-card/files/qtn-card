@@ -7,6 +7,11 @@
 #   qtn-card run '<cmd>' [s]   one command line on the card, its output as it comes, for s
 #                              seconds (10 by default). A command that reads the Wi-Fi key
 #                              (get_passphrase, hostapd.conf) prints it.
+#   qtn-card get               the state as name=value lines, for the 5 GHz page: the SSID, never
+#                              the key
+#   qtn-card set               changes what stdin gives, as name=value lines: ssid, key, channel
+#                              (0 lets the card choose), radio (on or off). Live, and kept by the
+#                              card across boots.
 # Passwords are asked on the terminal; from a pipe, one per line, in the order they are asked.
 # The card's telnetd runs login. Busybox has no telnet client: nc, as the stock firmware did.
 CARD=223.254.253.252
@@ -49,6 +54,19 @@ card() { (sleep 2; login; sleep 2; echo "$1"; sleep "${2:-4}"; echo exit) | sess
 after_marker() { sed -n '/^=M=$/,$p'; }
 # The echo of the command line holds $((6*7)), only a shell that ran it prints 42
 logged_in() { card 'echo =L=$((6*7))' | grep -q '^=L=42'; }
+# A session that ends as soon as the card has answered, within $2 seconds: LuCI gives a call 20 s.
+card_fast() {
+	flag=$(mktemp)
+	(sleep 2; login; sleep 2; echo "$1
+echo =E=\$((6*7))"; n=0; while [ -e "$flag" ] && [ $n -lt "$2" ]; do sleep 1; n=$((n + 1)); done; echo exit) | session |
+		while IFS= read -r l; do printf '%s\n' "$l"; case $l in =E=42*) rm -f "$flag" ;; esac; done
+	rm -f "$flag"
+}
+# A value as one word of the card's shell, whatever it holds
+quote() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
+# Printable ASCII, as the card's line editor and hostapd.conf take it: $1 is what's checked
+printable() { case $1 in *[!\ -~]*) return 1 ;; esac; }
+quiet='</dev/null >/dev/null 2>&1'
 
 case $1 in
 install)
@@ -96,8 +114,74 @@ run)
 $2" "${3:-10}" | after_marker
 	exit
 	;;
+get)
+	# An answer the card can't give (the channel with the radio off) is left out
+	out=$(card_fast 'q() { call_qcsapi "$@" </dev/null; }
+r=$(q get_regulatory_region wifi0)
+echo =M=
+echo "firmware=$(q get_firmware_version)"
+echo "radio=$(q rfstatus)"
+echo "channel=$(q get_channel wifi0)"
+echo "bw=$(q get_bw wifi0)"
+echo "region=$r"
+echo "clients=$(q get_count_assoc wifi0)"
+echo "ssid=$(q get_ssid wifi0)"
+echo "channels=$(q get_list_regulatory_channels $r)"
+echo "configured=$(get_wifi_config wifi0 channel)"' 8)
+	case $out in *=E=42*) ;; *) die "no answer from the card: a wrong password in $PASS?" ;; esac
+	printf '%s\n' "$out" | after_marker | grep -v -e '^=' -e '^quantenna #' -e '^> ' -e '=QCS API error'
+	[ -n "$cur" ] && echo login=password || echo login=open
+	exit
+	;;
+set)
+	script= names= move=
+	while IFS= read -r l; do
+		v=${l#*=}
+		case $l in
+		ssid=*)
+			[ ${#v} -ge 1 ] && [ ${#v} -le 32 ] && printable "$v" || die "an SSID is 1 to 32 printable ASCII characters"
+			c="call_qcsapi set_ssid wifi0 $(quote "$v") $quiet; echo =R=ssid=\$?"
+			move=1
+			;;
+		key=*)
+			[ ${#v} -ge 8 ] && [ ${#v} -le 63 ] && printable "$v" || die "a key is 8 to 63 printable ASCII characters"
+			c="call_qcsapi set_passphrase wifi0 0 $(quote "$v") $quiet; echo =R=key=\$?"
+			move=1
+			;;
+		channel=*)
+			case $v in ''|*[!0-9]*) die "a channel is a number, 0 to let the card choose" ;; esac
+			# set_channel refuses a channel of another region, so nothing wrong reaches the flash
+			c="r=1; call_qcsapi set_channel wifi0 $v $quiet && update_wifi_config wifi0 channel $v $quiet && r=0; echo =R=channel=\$r"
+			move=1
+			;;
+		radio=off)
+			c="update_wifi_config wifi0 start_down 1 $quiet && /scripts/rfenable 0 $quiet; echo =R=radio=\$?"
+			;;
+		radio=on)
+			# Never rfenable 1: it copies the default hostapd.conf over the one on the flash
+			c="update_wifi_config wifi0 start_down 0 $quiet && ifconfig wifi0 up $quiet && (base_scripts=/scripts; . /scripts/start-helpers.sh; start_security_daemon ap) $quiet; echo =R=radio=\$?"
+			move=1
+			;;
+		*)
+			die "can't set that: ${l%%=*}"
+			;;
+		esac
+		script="$script$c
+"
+		names="$names ${l%%=*}"
+	done
+	[ -n "$names" ] || die "nothing to set"
+	out=$(card_fast "$script" 8)
+	# 90 s: the card's 60 s radar check, on the upper channels, and its start. Even after a failure
+	# below: what went before it has dropped the clients.
+	[ -z "$move" ] || setsid wifi-to-5ghz 90 </dev/null >/dev/null 2>&1 &
+	for n in $names; do
+		case $out in *"=R=$n=0"*) ;; *) die "the card didn't take the $n" ;; esac
+	done
+	exit
+	;;
 ?*)
-	die "usage: qtn-card [install | run '<command line>' [seconds]]"
+	die "usage: qtn-card [install | run '<command line>' [seconds] | get | set]"
 	;;
 esac
 

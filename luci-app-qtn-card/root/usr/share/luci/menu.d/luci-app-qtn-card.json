@@ -1,0 +1,13 @@
+{
+	"admin/network/qtn-card": {
+		"title": "5 GHz",
+		"order": 16,
+		"action": {
+			"type": "view",
+			"path": "qtn-card"
+		},
+		"depends": {
+			"acl": [ "luci-app-qtn-card" ]
+		}
+	}
+}

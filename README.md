@@ -7,9 +7,11 @@ gets it working and closes it:
 
 - **`kmod-qdpc-host`**: Quantenna's GPL PCIe host driver, ported to Linux 6.18. It boots the card
   and links it to the router as `host0`.
-- **`qtn-card`**: the `qtn-card` command (the card's state, commands on it, and `install`, which
-  puts a hook on the card's flash closing its root access), `host0` in the LAN, and
-  `wifi-to-5ghz`, which moves the 2.4 GHz clients onto 5 GHz once after each boot.
+- **`qtn-card`**: the `qtn-card` command (the card's state, commands on it, changing its network,
+  and `install`, which puts a hook on the card's flash closing its root access), `host0` in the
+  LAN, and `wifi-to-5ghz`, which moves the 2.4 GHz clients onto 5 GHz once after each boot.
+- **`luci-app-qtn-card`**, optional: a LuCI page for the card, under Network → 5 GHz: its state, its
+  SSID, key and channel, and its radio.
 
 The card system, `topaz-linux.lzma.img`, isn't here: it has no redistribution licence. Each owner
 takes it from their router's stock firmware, through the install's backup.

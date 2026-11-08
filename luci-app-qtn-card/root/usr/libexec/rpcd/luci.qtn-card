@@ -1,0 +1,47 @@
+#!/bin/sh
+# The 5 GHz page's backend: qtn-card get and qtn-card set as ubus calls. A failure comes back as
+# {"error": what qtn-card said}.
+
+. /usr/share/libubox/jshn.sh
+
+fail() {
+	json_init
+	json_add_string error "$1"
+	json_dump
+	exit 0
+}
+
+case "$1" in
+list)
+	echo '{"get":{},"set":{"ssid":"str","key":"str","channel":"str","radio":"str"}}'
+	;;
+call)
+	case "$2" in
+	get)
+		out=$(qtn-card get 2>&1) || fail "$out"
+		json_init
+		while IFS= read -r l; do
+			json_add_string "${l%%=*}" "${l#*=}"
+		done <<END
+$out
+END
+		json_dump
+		;;
+	set)
+		read -r input
+		json_load "$input"
+		json_get_var ssid ssid
+		json_get_var key key
+		json_get_var channel channel
+		json_get_var radio radio
+		out=$( {
+			[ -z "$ssid" ] || printf 'ssid=%s\n' "$ssid"
+			[ -z "$key" ] || printf 'key=%s\n' "$key"
+			[ -z "$channel" ] || printf 'channel=%s\n' "$channel"
+			[ -z "$radio" ] || printf 'radio=%s\n' "$radio"
+		} | qtn-card set 2>&1) || fail "$out"
+		echo '{}'
+		;;
+	esac
+	;;
+esac

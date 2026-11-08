@@ -1,0 +1,15 @@
+{
+	"luci-app-qtn-card": {
+		"description": "Grant access to the 5 GHz card's state and settings",
+		"read": {
+			"ubus": {
+				"luci.qtn-card": [ "get" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"luci.qtn-card": [ "set" ]
+			}
+		}
+	}
+}
