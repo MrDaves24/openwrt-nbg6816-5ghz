@@ -18,9 +18,10 @@ define Package/qtn-card
 endef
 
 define Package/qtn-card/description
-  qtn-card shows the state of the NBG6816's Quantenna 5 GHz card, runs commands on it, and
-  installs on its flash a hook that closes its root access. The package also puts host0, the
-  link to the card, into br-lan, and moves the 2.4 GHz clients onto 5 GHz once after each boot.
+  qtn-card shows the state of the NBG6816's Quantenna 5 GHz card, changes its network, runs
+  commands on it, and installs on its flash a hook that closes its root access. The package also
+  puts host0, the link to the card, into br-lan, and moves the 2.4 GHz clients onto 5 GHz once
+  after each boot and after a change of the 5 GHz network.
 endef
 
 define Build/Compile

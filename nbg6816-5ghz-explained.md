@@ -90,7 +90,7 @@ three minutes after boot, if `host0` is up: they choose again, and take 5 GHz wh
 One that hears it badly comes back to 2.4 GHz.
 
 A change of the 5 GHz network does the same thing to its clients: the card's hostapd reloads, they
-drop, land on 2.4 GHz and stay. So `qtn-card set`, which the LuCI page uses too, runs the same move
+drop, land on 2.4 GHz and stay. So `qtn-card set`, which the 5 GHz page uses too, runs the same move
 90 seconds after such a change, long enough for the card's radar check; sooner, the clients find no
 5 GHz network yet and go back to 2.4 GHz.
 

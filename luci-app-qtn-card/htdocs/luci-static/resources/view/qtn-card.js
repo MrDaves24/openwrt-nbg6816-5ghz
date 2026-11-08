@@ -35,6 +35,8 @@ return view.extend({
 				ui.addNotification(null, E('p', res.error), 'error');
 			else
 				window.location.reload();
+		}).catch(function(e) {
+			ui.addNotification(null, E('p', e.message), 'error');
 		});
 	},
 
@@ -43,12 +45,15 @@ return view.extend({
 	},
 
 	handleSave: function() {
-		var st = this.state, net = this.net;
+		var st = this.state, map = this.map;
 
-		return this.map.parse().then(L.bind(function() {
-			var ssid = (net.ssid != st.ssid) ? net.ssid : undefined,
-			    key = net.key || undefined,
-			    channel = (net.channel != (st.configured || '0')) ? net.channel : undefined;
+		return map.parse().then(L.bind(function() {
+			// What the form holds now: parse() stores a field only when it differs from what it
+			// loaded, so after a failed Save its copy can hold a value since reverted
+			var val = function(name) { return map.lookupOption(name, 'net')[0].formvalue('net'); },
+			    ssid = (val('ssid') != st.ssid) ? val('ssid') : undefined,
+			    key = val('key') || undefined,
+			    channel = (val('channel') != (st.configured || '0')) ? val('channel') : undefined;
 
 			if (ssid === undefined && key === undefined && channel === undefined) {
 				ui.addNotification(null, E('p', _('Nothing to change.')), 'info');
@@ -71,7 +76,7 @@ return view.extend({
 
 		rows = [
 			[ _('Radio'), on ? _('On') : _('Off') ],
-			[ _('Channel in use'), on ? st.channel : '-' ],
+			[ _('Channel in use'), on ? st.channel : _('Off') ],
 			[ _('Width'), (on && st.bw) ? st.bw + ' MHz' : '-' ],
 			[ _('Clients'), st.clients || '0' ],
 			[ _('Region'), st.region ],
@@ -79,9 +84,7 @@ return view.extend({
 		];
 
 		this.state = st;
-		this.net = { ssid: st.ssid || '', key: '', channel: st.configured || '0' };
-
-		m = new form.JSONMap({ net: this.net });
+		m = new form.JSONMap({ net: { ssid: st.ssid || '', key: '', channel: st.configured || '0' } });
 		this.map = m;
 		m.readonly = !on;
 

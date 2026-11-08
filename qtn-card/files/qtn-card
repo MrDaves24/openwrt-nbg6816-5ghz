@@ -54,11 +54,11 @@ card() { (sleep 2; login; sleep 2; echo "$1"; sleep "${2:-4}"; echo exit) | sess
 after_marker() { sed -n '/^=M=$/,$p'; }
 # The echo of the command line holds $((6*7)), only a shell that ran it prints 42
 logged_in() { card 'echo =L=$((6*7))' | grep -q '^=L=42'; }
-# A session that ends as soon as the card has answered, within $2 seconds: LuCI gives a call 20 s.
+# A session that types exit as soon as the card has answered, or after 5 s: LuCI gives a call 20 s.
 card_fast() {
 	flag=$(mktemp)
 	(sleep 2; login; sleep 2; echo "$1
-echo =E=\$((6*7))"; n=0; while [ -e "$flag" ] && [ $n -lt "$2" ]; do sleep 1; n=$((n + 1)); done; echo exit) | session |
+echo =E=\$((6*7))"; n=0; while [ -e "$flag" ] && [ $n -lt 5 ]; do sleep 1; n=$((n + 1)); done; echo exit) | session |
 		while IFS= read -r l; do printf '%s\n' "$l"; case $l in =E=42*) rm -f "$flag" ;; esac; done
 	rm -f "$flag"
 }
@@ -66,6 +66,7 @@ echo =E=\$((6*7))"; n=0; while [ -e "$flag" ] && [ $n -lt "$2" ]; do sleep 1; n=
 quote() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
 # Printable ASCII, as the card's line editor and hostapd.conf take it: $1 is what's checked
 printable() { case $1 in *[!\ -~]*) return 1 ;; esac; }
+# For the card's commands: stdin holds the session's next lines, which they mustn't eat
 quiet='</dev/null >/dev/null 2>&1'
 
 case $1 in
@@ -127,7 +128,7 @@ echo "region=$r"
 echo "clients=$(q get_count_assoc wifi0)"
 echo "ssid=$(q get_ssid wifi0)"
 echo "channels=$(q get_list_regulatory_channels $r)"
-echo "configured=$(get_wifi_config wifi0 channel)"' 8)
+echo "configured=$(get_wifi_config wifi0 channel)"')
 	case $out in *=E=42*) ;; *) die "no answer from the card: a wrong password in $PASS?" ;; esac
 	printf '%s\n' "$out" | after_marker | grep -v -e '^=' -e '^quantenna #' -e '^> ' -e '=QCS API error'
 	[ -n "$cur" ] && echo login=password || echo login=open
@@ -171,10 +172,12 @@ set)
 		names="$names ${l%%=*}"
 	done
 	[ -n "$names" ] || die "nothing to set"
-	out=$(card_fast "$script" 8)
-	# 90 s: the card's 60 s radar check, on the upper channels, and its start. Even after a failure
-	# below: what went before it has dropped the clients.
-	[ -z "$move" ] || setsid wifi-to-5ghz 90 </dev/null >/dev/null 2>&1 &
+	out=$(card_fast "$script")
+	# 90 s: the card's 60 s radar check, on the upper channels, and its start. Whenever the card took
+	# anything, even with a failure below: a value it refused drops no client, one it took does.
+	if [ -n "$move" ] && printf '%s\n' "$out" | grep -q '^=R=[a-z]*=0$'; then
+		setsid wifi-to-5ghz 90 </dev/null >/dev/null 2>&1 &
+	fi
 	for n in $names; do
 		case $out in *"=R=$n=0"*) ;; *) die "the card didn't take the $n" ;; esac
 	done

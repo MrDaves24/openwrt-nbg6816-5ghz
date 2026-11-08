@@ -3,8 +3,8 @@
 # 5 GHz card about 34 s plus its 60 s radar check, so every client joins 2.4 GHz first and, with one
 # SSID on both bands, stays there. One disconnect, with no ban, makes them choose again: they pick
 # 5 GHz, and one that hears it badly comes back. qtn-card set runs it too, after a change that drops
-# the 5 GHz clients, with a shorter wait: it can't be shorter than the card's radar check, or the
-# clients it moves find no 5 GHz network and return to 2.4 GHz.
+# the 5 GHz clients, with a shorter wait in seconds as $1: not shorter than the card's radar check, or
+# the clients it moves find no 5 GHz network and return to 2.4 GHz.
 
 sleep "${1:-180}"
 [ "$(cat /sys/class/net/host0/carrier 2>/dev/null)" = 1 ] || {

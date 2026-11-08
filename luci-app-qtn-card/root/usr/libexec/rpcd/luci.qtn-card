@@ -29,17 +29,11 @@ END
 		;;
 	set)
 		read -r input
-		json_load "$input"
-		json_get_var ssid ssid
-		json_get_var key key
-		json_get_var channel channel
-		json_get_var radio radio
-		out=$( {
-			[ -z "$ssid" ] || printf 'ssid=%s\n' "$ssid"
-			[ -z "$key" ] || printf 'key=%s\n' "$key"
-			[ -z "$channel" ] || printf 'channel=%s\n' "$channel"
-			[ -z "$radio" ] || printf 'radio=%s\n' "$radio"
-		} | qtn-card set 2>&1) || fail "$out"
+		# jsonfilter from stdin: json_load would put the key in a command line
+		out=$(for f in ssid key channel radio; do
+			v=$(printf %s "$input" | jsonfilter -e "@.$f")
+			[ -z "$v" ] || printf '%s=%s\n' "$f" "$v"
+		done | qtn-card set 2>&1) || fail "$out"
 		echo '{}'
 		;;
 	esac

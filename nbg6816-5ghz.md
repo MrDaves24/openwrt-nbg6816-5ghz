@@ -58,8 +58,12 @@ make package/qdpc-host/compile package/qtn-card/compile
 They land in `bin/targets/ipq806x/generic/packages/kmod-qdpc-host-*.apk` and
 `bin/packages/*/nbg6816_5ghz/qtn-card-*.apk`.
 
+If you build your own images, you can instead set both lines to `=y` before building the image:
+the packages are then in it, and stay through every `sysupgrade`. In step 3, only the card system
+is copied then, and there is no `apk add`.
+
 If your router has LuCI and you want a page for the card in it, build a third package, which lands
-beside `qtn-card`, and copy and install it with the others in step 3:
+beside `qtn-card` (or set its line to `=y` too, before building the image):
 
 ```sh
 ./scripts/feeds update luci
@@ -68,10 +72,6 @@ echo CONFIG_PACKAGE_luci-app-qtn-card=m >>.config
 make defconfig
 make package/luci-app-qtn-card/compile
 ```
-
-If you build your own images, you can instead set both lines to `=y` before building the image:
-the packages are then in it, and stay through every `sysupgrade`. In step 3, only the card system
-is copied then, and there is no `apk add`.
 
 ## 3. Install them
 
@@ -92,6 +92,9 @@ reboot
 ```
 
 The card system has to be in place first: the driver loads it into the card as soon as it starts.
+
+If you built the third package, add `bin/packages/*/nbg6816_5ghz/luci-app-qtn-card-*.apk` to the
+`scp`, and `/tmp/luci-app-qtn-card-*.apk` to the `apk add`.
 
 ## 4. Close the card's root access
 
@@ -146,7 +149,7 @@ state. The page takes about 12 seconds to load, because the router logs into the
 
 The router disconnects its 2.4 GHz clients once, three minutes after each boot, so that clients
 of a network with one SSID on both bands choose again and take 5 GHz where they hear it. To turn
-that off: `/etc/init.d/wifi-to-5ghz disable`, again after each install of the package.
+that off at boot: `/etc/init.d/wifi-to-5ghz disable`, again after each install of the package.
 
 ## After a sysupgrade
 
