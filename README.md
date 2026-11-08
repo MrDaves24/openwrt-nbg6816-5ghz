@@ -11,7 +11,7 @@ gets it working and closes it:
   puts a hook on the card's flash closing its root access), `host0` in the LAN, and
   `wifi-to-5ghz`, which moves the 2.4 GHz clients onto 5 GHz once after each boot.
 
-The card's system, `topaz-linux.lzma.img`, isn't here: it has no redistribution licence. Each owner
+The card system, `topaz-linux.lzma.img`, isn't here: it has no redistribution licence. Each owner
 takes it from their router's stock firmware, through the install's backup.
 
 - **[The tutorial](nbg6816-5ghz.md)**: from OpenWrt on the router to 5 GHz on air.

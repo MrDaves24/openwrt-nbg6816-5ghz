@@ -18,11 +18,11 @@ air. How it works, and why the card needs closing: [the explanation](nbg6816-5gh
 
 - An NBG6816 running OpenWrt, installed with the
   [install guide](https://github.com/MrDaves24/openwrt-nbg6816-install), and the
-  `nbg6816-stock.tar` its backup step saved on your PC. The card's system comes only from there:
+  `nbg6816-stock.tar` its backup step saved on your PC. The card system comes only from there:
   Zyxel no longer publishes the firmware, and this repo can't ship it.
 - The OpenWrt build tree your image was built from, or, once an OpenWrt release supports the
   NBG6816, that release's SDK. The driver must be built for the exact kernel your router runs.
-- On the PC, `unsquashfs` from squashfs-tools 4.4 or later (`squashfs-tools` on Debian and
+- On the PC, `unsquashfs` from squashfs-tools 4.5 or later (`squashfs-tools` on Debian and
   Ubuntu, `squashfs` in Homebrew).
 
 The commands use `192.168.1.1`, OpenWrt's default address: use your router's.
@@ -92,7 +92,9 @@ qtn-card install
 ```
 
 It asks for a root password for the card, twice (8 characters or more). It keeps it in
-`/etc/qtn-card.pass`, readable by root only, for the `qtn-card` command. Then check:
+`/etc/qtn-card.pass`, readable by root only, for the `qtn-card` command. Note it somewhere too:
+after a reset or a `sysupgrade -n` that file is gone, `qtn-card install` asks for the password,
+and there is no known way into the card without it. Then check:
 
 ```sh
 qtn-card
@@ -119,15 +121,16 @@ The card writes them to its flash; they take effect at the router's next boot (`
 channel of `0` lets the card choose. The card stays in the EU's regulatory domain whatever you
 set: it can't be changed.
 
-With the same SSID and key on both bands, the router disconnects its 2.4 GHz clients once, three
-minutes after each boot, so that they choose again and take 5 GHz where they hear it. To turn
-that off: `/etc/init.d/wifi-to-5ghz disable`.
+The router disconnects its 2.4 GHz clients once, three minutes after each boot, so that clients
+of a network with one SSID on both bands choose again and take 5 GHz where they hear it. To turn
+that off: `/etc/init.d/wifi-to-5ghz disable`, again after each install of the package.
 
 ## After a sysupgrade
 
 `sysupgrade` keeps the card system and the card's password, not the packages: install the two
 packages built with the new image (step 3's `apk add`, then `reboot`). The card keeps its hook and
-its settings in its own flash: nothing to do on the card again.
+its settings in its own flash: nothing to do on the card again. A `sysupgrade -n` or a reset keeps
+neither file: copy the card system again (step 3), and `qtn-card install` asks for the password.
 
 ---
 

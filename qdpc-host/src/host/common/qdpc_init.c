@@ -653,8 +653,8 @@ static void link_monitor_sleep(struct vmac_priv *priv)
 /*
  * Once the card runs, read its boot data area every 500 ms: all ones means the card reset. Quantenna
  * rebooted the router then (emergency_restart); a card that resets at every boot would loop the
- * unit, so this only takes host0 down and waits to be stopped (sprint 09). 5 GHz is back at the
- * next reboot.
+ * router, so this only takes host0 down and waits to be stopped. 5 GHz is back at the next
+ * reboot.
  */
 static int link_monitor(void *data)
 {

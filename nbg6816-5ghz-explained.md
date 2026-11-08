@@ -73,6 +73,11 @@ servers over PCIe stay, reachable from the router only. A flag file in the jffs2
 off, and WPS goes off in the card's settings, which ends the UPnP listener. Telnet stays, behind
 the password: it is how `qtn-card` manages the card, and the router has no client for the PCIe RPC.
 
+What stays open: the hook only runs once the card has started, so for a few seconds at each boot
+the card is as it ships, until the hook has set the password and stopped the RPC servers. A UDP
+socket of the card's kernel on port 49300 stays too, unidentified: no process holds it, and the
+card's modules don't name it.
+
 Neither the card's BusyBox nor OpenWrt's has a tool to hash a password, and the card's C library
 knows only MD5-crypt and DES: `qtn-card` carries a small helper that makes the `$1$` hash.
 
@@ -96,9 +101,9 @@ One that hears it badly comes back to 2.4 GHz.
 - The card's `iwconfig` reports 0 dBm whatever the power: `call_qcsapi get_tx_power wifi0
   <channel>` gives the real one.
 - The radar check delays 5 GHz by a minute at every boot on the upper channels.
-- What's proven, on one unit: the card booting and serving clients, both radios at once, reboots
-  with the driver loaded at boot. Not measured: throughput, both radios under load, weeks of
-  uptime.
+- What's proven, on one unit used as an access point: the card booting and serving clients, both
+  radios at once, reboots with the driver loaded at boot. Not tried: a router in its default
+  routing mode. Not measured: throughput, both radios under load, weeks of uptime.
 
 The Netgear R7500 v1 reportedly carries the same card; this repo is untried there.
 

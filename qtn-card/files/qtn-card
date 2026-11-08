@@ -28,10 +28,12 @@ ask() {
 	fi
 	echo "$p"
 }
-# Whether login asks for a password: the card hook sets one, a card without it has none
-asks() { (sleep 2; echo root; sleep 3) | session | grep -q 'assword:'; }
+# What login answers: the card hook sets a password, a card without it has none, and no prompt
+# at all means the card pings but its telnetd isn't up yet
+prompt=$( (sleep 2; echo root; sleep 3) | session)
+case $prompt in *login:*) ;; *) die "the card doesn't answer on telnet yet: try again in a minute" ;; esac
 cur=
-if asks; then
+case $prompt in *assword:*)
 	if [ -r $PASS ]; then
 		cur=$(cat $PASS)
 	elif [ "$1" = install ]; then
@@ -39,7 +41,8 @@ if asks; then
 	else
 		die "the card asks for a password, and $PASS is missing: run qtn-card install"
 	fi
-fi
+	;;
+esac
 login() { echo root; [ -z "$cur" ] || { sleep 2; echo "$cur"; }; }
 card() { (sleep 2; login; sleep 2; echo "$1"; sleep "${2:-4}"; echo exit) | session; }
 # The output from the marker on: the session's echo before it holds what was typed
@@ -66,22 +69,23 @@ install)
 $hook
 QTN_HOOK_END
 chmod 755 /tmp/tweak_qcomm
-(trap '' HUP; /tmp/tweak_qcomm) >/dev/null 2>&1 &
 echo =M=
 md5sum /tmp/tweak_qcomm" 10 | after_marker)
 	echo "$out" | grep -q "^$sent " || die "the hook the card got isn't the one sent: nothing changed"
+	card "(trap '' HUP; /tmp/tweak_qcomm) >/dev/null 2>&1 &" >/dev/null
 	cur=$new
 	sleep 3
 	logged_in || die "the card doesn't take the new password: nothing written to its flash, and a reboot brings the card back as it was"
-	(umask 077 && echo "$new" >$PASS) || die "writing $PASS failed"
-	# Then on its flash, for every boot
+	# Then on its flash, for every boot. The password is kept last: until the flash has the hook,
+	# the card's next boot goes back to the old one.
 	out=$(card "cp /tmp/tweak_qcomm /mnt/jffs2/tweak_qcomm
 touch /mnt/jffs2/httpd-disabled
 killall mini_httpd
 call_qcsapi disable_wps wifi0 1
 echo =M=
 md5sum /mnt/jffs2/tweak_qcomm" 6 | after_marker)
-	echo "$out" | grep -q "^$sent " || die "the hook on the card's flash isn't the one sent"
+	echo "$out" | grep -q "^$sent " || die "the hook on the card's flash isn't the one sent: a reboot brings the card back as it was"
+	(umask 077 && echo "$new" >$PASS) || die "the card is closed, but writing $PASS failed: its password is the one you just gave"
 	echo "The card hook is on the card's flash and running: root's password set, the RPC servers"
 	echo "over TCP stopped, the web UI and WPS off. The password is in $PASS."
 	exit
