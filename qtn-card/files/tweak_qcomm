@@ -1,0 +1,28 @@
+#!/bin/sh
+# The card hook: the 5 GHz card runs /mnt/jffs2/tweak_qcomm from its own flash at each boot, in the
+# background, before its RPC servers and web UI start (the card system's scripts/start-prod). This
+# one closes the card's root access but telnet, which then asks for root's password: qtn-card
+# writes its hash in place of @HASH@ when it copies this file to the card. For the card's busybox
+# 1.10: no tr.
+
+# The card's own IPv6 addresses only served its listeners; its clients' IPv6 is bridged below IP
+n=0
+while [ ! -d /proc/sys/net/ipv6/conf/br0 ] && [ $n -lt 60 ]; do sleep 1; n=$((n + 1)); done
+echo 1 >/proc/sys/net/ipv6/conf/default/disable_ipv6
+echo 1 >/proc/sys/net/ipv6/conf/br0/disable_ipv6
+
+# /etc is the card system's initramfs, rebuilt at each boot. admin (uid 0) and default have empty
+# passwords too: locked.
+sed -i -e 's|^root:[^:]*:|root:@HASH@:|' -e 's|^admin:[^:]*:|admin:!:|' \
+	-e 's|^default:[^:]*:|default:!:|' /etc/shadow
+
+# The RPC servers over TCP are root-equivalent, without authentication. Wait for S55rpc to start
+# them, then stop their restart loops (scripts/cmdloop) before the servers, and portmap. The --pcie
+# ones stay: only the host reaches them.
+pids() { ps | grep "$1" | grep -v grep | while read pid rest; do echo $pid; done; }
+n=0
+while [ -z "$(pids 'call_qcsapi_rpcd --tcp')" ] && [ $n -lt 120 ]; do sleep 1; n=$((n + 1)); done
+sleep 2
+kill $(pids 'cmdloop .*--tcp') 2>/dev/null
+kill $(pids 'rpcd --tcp') 2>/dev/null
+killall portmap 2>/dev/null

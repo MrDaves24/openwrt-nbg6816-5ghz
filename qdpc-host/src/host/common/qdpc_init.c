@@ -26,6 +26,7 @@
 #include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/kthread.h>
+#include <linux/sched/task.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -34,7 +35,6 @@
 #include <linux/firmware.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/reboot.h>
 
 #include "qdpc_config.h"
 #include "qdpc_debug.h"
@@ -70,11 +70,9 @@ static int qdpc_boot_thread(void *data);
 static void qdpc_nl_recv_msg(struct sk_buff *skb);
 int qdpc_init_netdev(struct net_device  **net_dev, struct pci_dev *pdev);
 
-static bool is_ep_reset = false;
-#ifndef PCIE_HOTPLUG_SUPPORTED
 static int link_monitor(void *data);
-static struct task_struct *link_monitor_thread = NULL;
-#endif
+static struct task_struct *qdpc_thread_start(int (*fn)(void *), void *data, const char *name);
+static void qdpc_thread_stop(struct task_struct *t);
 
 char qdpc_pcie_driver_name[] = "qdpc_host";
 
@@ -96,7 +94,6 @@ struct netlink_kernel_cfg qdpc_netlink_cfg = {
 	.flags    = 0,
 #endif
 	.input    = qdpc_nl_recv_msg,
-	.cb_mutex = NULL,
 	.bind     = NULL,
 };
 #endif
@@ -223,8 +220,8 @@ static int qdpc_firmware_load(struct pci_dev *pdev, struct vmac_priv *priv, cons
 			return FAILURE;
 		}
 
-		handle = pci_map_single(priv->pdev, data ,DMABLOCKSIZE, PCI_DMA_TODEVICE);
-		if (!handle) {
+		handle = dma_map_single(&priv->pdev->dev, data, DMABLOCKSIZE, DMA_TO_DEVICE);
+		if (dma_mapping_error(&priv->pdev->dev, handle)) {
 			printk("Pci map for memory data block 0x%p error, Download firmware failed!\n", data);
 			free_pages((unsigned long)data, get_order(DMABLOCKSIZE));
 			release_firmware(fw);
@@ -243,7 +240,7 @@ static int qdpc_firmware_load(struct pci_dev *pdev, struct vmac_priv *priv, cons
 
 			memcpy(data, curdata, size);
 			/* flush dcache */
-			pci_dma_sync_single_for_device(priv->pdev, handle ,size, PCI_DMA_TODEVICE);
+			dma_sync_single_for_device(&priv->pdev->dev, handle, size, DMA_TO_DEVICE);
 
 			qdpc_pcie_posted_write(handle + dma_offset, &bda->bda_img);
 			qdpc_pcie_posted_write(size, &bda->bda_img_size);
@@ -257,7 +254,7 @@ static int qdpc_firmware_load(struct pci_dev *pdev, struct vmac_priv *priv, cons
 			printk("done!\n");
 		}
 
-		pci_unmap_single(priv->pdev,handle, DMABLOCKSIZE, PCI_DMA_TODEVICE);
+		dma_unmap_single(&priv->pdev->dev, handle, DMABLOCKSIZE, DMA_TO_DEVICE);
 		/* Mark end of block */
 		qdpc_pcie_posted_write(0, &bda->bda_img);
 		qdpc_pcie_posted_write(0, &bda->bda_img_size);
@@ -322,9 +319,9 @@ static void qdpc_tune_pcie_mps(struct pci_dev *pdev, int pos)
 	pci_write_config_word(pdev, pos + PCI_EXP_DEVCTL, dev_ctl);
 
 	if (parent && ppos) {
-		pci_read_config_word(parent, pos + PCI_EXP_DEVCTL, &pctl);
+		pci_read_config_word(parent, ppos + PCI_EXP_DEVCTL, &pctl);
 		pctl = ((pctl & ~PCI_EXP_DEVCTL_PAYLOAD) | mps);
-		pci_write_config_word(parent, pos + PCI_EXP_DEVCTL, pctl);
+		pci_write_config_word(parent, ppos + PCI_EXP_DEVCTL, pctl);
 	}
 }
 
@@ -394,14 +391,6 @@ static int qdpc_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto free_mem_interrupt;
 	}
 
-	/* Create and start the thread to initiate the INIT Handshake*/
-	priv->init_thread = kthread_run(qdpc_boot_thread, priv, "qdpc_init_thread");
-	if (priv->init_thread == NULL) {
-		PRINT_ERROR("Init thread creation failed \n");
-		goto free_mem_interrupt;
-	}
-
-
 	/* Create netlink & register with kernel */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
 	priv->nl_socket = netlink_kernel_create(&init_net,
@@ -414,16 +403,45 @@ static int qdpc_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 				QDPC_NETLINK_RPC_PCI_CLNT, 0, qdpc_nl_recv_msg,
 				NULL, THIS_MODULE);
 #endif
-	if (priv->nl_socket) {
-		return SUCCESS;
+	if (!priv->nl_socket) {
+		PRINT_ERROR(KERN_ALERT "Error creating netlink socket.\n");
+		result = FAILURE;
+		goto clean_netdev;
 	}
 
-	PRINT_ERROR(KERN_ALERT "Error creating netlink socket.\n");
-	result = FAILURE;
+	/* host0 has a carrier once the card has booted (qdpc_boot_done) */
+	netif_carrier_off(ndev);
+
+	/* The monitor first: the boot thread wakes it when the card runs */
+	priv->link_monitor = qdpc_thread_start(link_monitor, priv, "link_monitor");
+	if (IS_ERR(priv->link_monitor)) {
+		result = PTR_ERR(priv->link_monitor);
+		priv->link_monitor = NULL;
+		goto release_netlink;
+	}
+
+	/* Create and start the thread to initiate the INIT Handshake*/
+	priv->init_thread = qdpc_thread_start(qdpc_boot_thread, priv, "qdpc_init_thread");
+	if (IS_ERR(priv->init_thread)) {
+		PRINT_ERROR("Init thread creation failed \n");
+		result = PTR_ERR(priv->init_thread);
+		priv->init_thread = NULL;
+		goto stop_monitor;
+	}
+
+	return SUCCESS;
+
+stop_monitor:
+	qdpc_thread_stop(priv->link_monitor);
+release_netlink:
+	netlink_kernel_release(priv->nl_socket);
+clean_netdev:
+	vmac_clean(ndev);
 
 free_mem_interrupt:
 	qdpc_pcie_free_mem(pdev);
 	qdpc_free_interrupt(pdev);
+	qdpc_unmap_iomem(priv);
 
 release_memory:
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,28)
@@ -436,6 +454,7 @@ release_memory:
 out:
 	kfree(priv->nl_buf);
 	free_netdev(ndev);
+	g_ndev = NULL;
 	/* Any failure in probe, so it can directly return in remove */
 	pci_set_drvdata(pdev, NULL);
 
@@ -452,8 +471,8 @@ static void qdpc_pcie_remove(struct pci_dev *pdev)
 
 	vmp = netdev_priv(ndev);
 
-	if (vmp->init_thread)
-		kthread_stop(vmp->init_thread);
+	qdpc_thread_stop(vmp->init_thread);
+	qdpc_thread_stop(vmp->link_monitor);
 	if (vmp->nl_socket)
 		netlink_kernel_release(vmp->nl_socket);
 
@@ -586,13 +605,9 @@ static int __init qdpc_init_module(void)
 	/*  Register the pci driver with device*/
 	if ((ret = pci_register_driver(&qdpc_pcie_driver)) < 0 ) {
 		PRINT_ERROR("Could not register the driver to pci : %d\n", ret);
-		ret = -ENODEV;
-		return ret;
+		qdpc_platform_exit();
+		return -ENODEV;
 	}
-
-#ifndef PCIE_HOTPLUG_SUPPORTED
-	link_monitor_thread = kthread_run(link_monitor, NULL, "link_monitor");
-#endif
 
 	return ret;
 }
@@ -602,11 +617,6 @@ static void __exit qdpc_exit_module(void)
 	/* Release netlink */
 	qdpc_platform_exit();
 
-#ifndef PCIE_HOTPLUG_SUPPORTED
-	kthread_stop(link_monitor_thread);
-	link_monitor_thread = NULL;
-#endif
-
 	/* Unregister the pci driver with the device */
 	pci_unregister_driver(&qdpc_pcie_driver);
 
@@ -614,101 +624,62 @@ static void __exit qdpc_exit_module(void)
 	return;
 }
 
-static inline bool is_pcie_linkup(struct pci_dev *pdev)
+/* A kthread held until qdpc_thread_stop, even if it has returned by then */
+static struct task_struct *qdpc_thread_start(int (*fn)(void *), void *data, const char *name)
 {
-	uint32_t cs = 0;
+	struct task_struct *t = kthread_create(fn, data, "%s", name);
 
-	pci_read_config_dword(pdev, QDPC_VENDOR_ID_OFFSET, &cs);
-	if (cs == QDPC_LINK_UP) {
-		msleep(10000);
-		printk("%s: PCIe link up!\n", __func__);
-		return true;
+	if (!IS_ERR(t)) {
+		get_task_struct(t);
+		wake_up_process(t);
 	}
-
-	return false;
+	return t;
 }
 
-static inline void qdpc_pcie_print_config_space(struct pci_dev *pdev)
+static void qdpc_thread_stop(struct task_struct *t)
 {
-	int i = 0;
-	uint32_t cs = 0;
-
-	/* Read PCIe configuration space header */
-	for (i = QDPC_VENDOR_ID_OFFSET; i <= QDPC_INT_LINE_OFFSET; i += QDPC_ROW_INCR_OFFSET) {
-		pci_read_config_dword(pdev, i, &cs);
-		printk("%s: pdev:0x%p config_space offset:0x%02x value:0x%08x\n", __func__, pdev, i, cs);
-	}
-	printk("\n");
+	kthread_stop(t);
+	put_task_struct(t);
 }
 
-static inline void qdpc_pcie_check_link(struct pci_dev *pdev, struct vmac_priv *priv)
+static void link_monitor_sleep(struct vmac_priv *priv)
 {
-	__iomem qdpc_pcie_bda_t *bda = priv->bda;
-	uint32_t cs = 0;
-
-	pci_read_config_dword(pdev, QDPC_VENDOR_ID_OFFSET, &cs);
-	/* Endian value will be all 1s if link went down */
-	if (readl(&bda->bda_pci_endian) == QDPC_LINK_DOWN) {
-		is_ep_reset = true;
-		printk("Reset detected\n");
-	}
+	set_current_state(TASK_INTERRUPTIBLE);
+	if (!kthread_should_stop() && !READ_ONCE(priv->card_running))
+		schedule();
+	__set_current_state(TASK_RUNNING);
 }
 
-#ifndef PCIE_HOTPLUG_SUPPORTED
+/*
+ * Once the card runs, read its boot data area every 500 ms: all ones means the card reset. Quantenna
+ * rebooted the router then (emergency_restart); a card that resets at every boot would loop the
+ * unit, so this only takes host0 down and waits to be stopped (sprint 09). 5 GHz is back at the
+ * next reboot.
+ */
 static int link_monitor(void *data)
 {
-	struct net_device *ndev = NULL;
-	struct vmac_priv *priv = NULL;
-	__iomem qdpc_pcie_bda_t *bda = NULL;
-	struct pci_dev *pdev = NULL;
-	uint32_t cs = 0;
+	struct vmac_priv *priv = data;
 
-	set_current_state(TASK_RUNNING);
+	while (!kthread_should_stop() && !READ_ONCE(priv->card_running))
+		link_monitor_sleep(priv);
+
 	while (!kthread_should_stop()) {
-		__set_current_state(TASK_INTERRUPTIBLE);
-		schedule();
-		set_current_state(TASK_RUNNING);
-
-		ndev = g_ndev;
-		priv = netdev_priv(ndev);
-		bda = priv->bda;
-		pdev = priv->pdev;
-
-#ifdef QDPC_CS_DEBUG
-		qdpc_pcie_print_config_space(pdev);
-		msleep(5000);
-#endif
-
-		/* Check if reset to EP occurred */
-		while (!pci_read_config_dword(pdev, QDPC_VENDOR_ID_OFFSET, &cs)) {
-
-			if (kthread_should_stop())
-				do_exit(0);
-
-			qdpc_pcie_check_link(pdev, priv);
-			if (is_ep_reset) {
-				is_ep_reset = false;
-
-				/* add code to reboot the while QCA system here*/
-				printk("%s: Attempting to reboot QCA system.\n", __func__);
-				emergency_restart();
-				break;
-			}
-			msleep(500);
+		if (readl(&priv->bda->bda_pci_endian) == QDPC_LINK_DOWN) {
+			printk(KERN_ERR "%s: the card reset; 5 GHz is down until the next reboot\n",
+			       qdpc_pcie_driver_name);
+			priv->ep_ready = 0;
+			netif_carrier_off(priv->ndev);
+			break;
 		}
+		msleep_interruptible(500);
+	}
 
-		while(!is_pcie_linkup(pdev)) {
-		}
-
-#ifdef QDPC_CS_DEBUG
-		qdpc_pcie_print_config_space(pdev);
-#endif
-
-		qdpc_pcie_probe(pdev, NULL);
-    }
-    do_exit(0);
+	/* Until remove stops it */
+	WRITE_ONCE(priv->card_running, false);
+	while (!kthread_should_stop())
+		link_monitor_sleep(priv);
+	return 0;
 }
-#endif
 
 static int qdpc_bringup_fw(struct vmac_priv *priv)
 {
@@ -726,8 +697,7 @@ static int qdpc_bringup_fw(struct vmac_priv *priv)
 #ifndef SKIP_PCI_DMA_MASK
 	if (qdpc_set_dma_mask(priv)){
 		printk("Failed to map DMA mask.\n");
-		priv->init_thread = NULL;
-		do_exit(-1);
+		return -1;
 	}
 #endif
 
@@ -750,8 +720,7 @@ static int qdpc_bringup_fw(struct vmac_priv *priv)
 	printk("Start download Firmware %s...\n", fwname);
 	if (qdpc_firmware_load(priv->pdev, priv, fwname)){
 		printk("Failed to download firmware.\n");
-		priv->init_thread = NULL;
-		do_exit(-1);
+		return -1;
 	}
 
 fw_start:
@@ -760,8 +729,7 @@ fw_start:
 	if (bdaflg != PCIE_BDA_XMIT_UBOOT) {
 		if (qdpc_bootpoll(priv,QDPC_BDA_FW_CONFIG)) {
 			booterror(bda);
-			priv->init_thread = NULL;
-			do_exit(-1);
+			return -1;
 		}
 		printk("EP boot successful, starting config...\n");
 
@@ -785,28 +753,29 @@ static int qdpc_boot_done(struct vmac_priv *priv)
 
 	PRINT_INFO("Connection established with Target BBIC4 board\n");
 
-#ifndef PCIE_HOTPLUG_SUPPORTED
-	if (link_monitor_thread)
-		wake_up_process(link_monitor_thread);
-#endif
+	netif_carrier_on(ndev);
+	WRITE_ONCE(priv->card_running, true);
+	wake_up_process(priv->link_monitor);
 
-	priv->init_thread = NULL;
-	do_exit(0);
+	return 0;
 }
 
 static int qdpc_boot_thread(void *data)
 {
 	struct vmac_priv *priv = (struct vmac_priv *)data;
 	int i;
+	int ret = 0;
 
 	for (i = 0; i < MAX_IMG_NUM; i++) {
-		if (qdpc_bringup_fw(priv) <= 0)
+		ret = qdpc_bringup_fw(priv);
+		if (ret <= 0)
 			break;
 	}
 
-	qdpc_boot_done(priv);
+	if (ret >= 0)
+		qdpc_boot_done(priv);
 
-	return 0;
+	return ret;
 }
 
 static void qdpc_nl_recv_msg(struct sk_buff *skb)

@@ -57,6 +57,11 @@
 
 #define DRV_NAME	"qdpc-host"
 
+/* Its blocks still use the pre-5.18 PCI DMA API, and vmac_rx_poll's unmap doesn't fit it */
+#ifdef QTN_SKB_RECYCLE_SUPPORT
+#error "QTN_SKB_RECYCLE_SUPPORT is not ported to 6.18"
+#endif
+
 #ifndef DRV_VERSION
 #define DRV_VERSION	"1.0-k5.4-openwrt-nonss-tc"
 #endif
@@ -74,8 +79,7 @@ MODULE_LICENSE("GPL");
 static int __sram_text vmac_rx_poll (struct napi_struct *napi, int budget);
 static int __sram_text skb2rbd_attach(struct net_device *ndev, uint16_t i, uint32_t wrap);
 static irqreturn_t vmac_interrupt(int irq, void *dev_id);
-static void vmac_tx_timeout(struct net_device *ndev);
-static void vmac_get_drvinfo(struct net_device *ndev, struct ethtool_drvinfo *info);
+static void vmac_tx_timeout(struct net_device *ndev, unsigned int txqueue);
 static void free_tx_skbs(struct vmac_priv *vmp);
 static void init_tx_bd(struct vmac_priv *vmp);
 static void free_rx_skbs(struct vmac_priv *vmp);
@@ -446,13 +450,15 @@ static int alloc_bd_tbl(struct net_device *ndev)
 	struct vmac_priv *vmp = netdev_priv(ndev);
 	uint32_t ucaddr;
 	uint32_t paddr;
+	dma_addr_t handle;
 	int len;	/* Length of allocated Transmitted & Received descriptor array */
 
 	/* uint32_t is used to be updated by ep */
 	len = (vmp->tx_bd_num + vmp->rx_bd_num) * VMAC_BD_LEN + VMAC_BD_INT32_VAR * sizeof(uint32_t);
-	ucaddr = (uint32_t)pci_alloc_consistent(vmp->pdev, len, (dma_addr_t *)&paddr);
+	ucaddr = (uint32_t)dma_alloc_coherent(&vmp->pdev->dev, len, &handle, GFP_KERNEL);
 	if (!ucaddr)
 		return -1;
+	paddr = handle;
 
 	memset((void *)ucaddr, 0, len);
 
@@ -498,7 +504,7 @@ static int alloc_bd_tbl(struct net_device *ndev)
 
 static void free_bd_tbl(struct vmac_priv *vmp)
 {
-	pci_free_consistent(vmp->pdev, vmp->uncache_len, (void *)vmp->addr_uncache,
+	dma_free_coherent(&vmp->pdev->dev, vmp->uncache_len, (void *)vmp->addr_uncache,
 			qdpc_pci_readl(&vmp->bda->bda_rc_tx_bd_base));
 }
 
@@ -773,6 +779,9 @@ static int __sram_text vmac_rx_poll(struct napi_struct *napi, int budget)
 		struct sk_buff *skb;
 		skb = vmp->rx_skb[i];
 		if (skb) {
+			/* Before the CPU reads it, with the length skb2rbd_attach mapped */
+			dma_unmap_single(&vmp->pdev->dev, le32_to_cpu(rbdp->buff_addr),
+				skb_end_pointer(skb) - skb->data, DMA_FROM_DEVICE);
 			skb_reserve(skb, VMAC_GET_OFFSET(descw1));
 			skb_put(skb, VMAC_GET_LEN(descw1));
 
@@ -789,14 +798,6 @@ static int __sram_text vmac_rx_poll(struct napi_struct *napi, int budget)
 				}
 				dev_kfree_skb(skb);
 			} else {
-#ifdef QTN_SKB_RECYCLE_SUPPORT
-				pci_unmap_single(vmp->pdev, rbdp->buff_addr,
-					skb_end_pointer(skb) - skb->data, (int)DMA_BIDIRECTIONAL);
-#else
-				pci_unmap_single(vmp->pdev, rbdp->buff_addr,
-					skb_end_pointer(skb) - skb->data, (int)DMA_FROM_DEVICE);
-#endif /* QTN_SKB_RECYCLE_SUPPORT */
-
 #ifdef RX_IP_HDR_REALIGN
 				if (rx_pkt_align)
 					vmac_rx_ip_align_ahead(skb, 2);
@@ -892,8 +893,18 @@ static int __sram_text skb2rbd_attach(struct net_device *ndev, uint16_t rx_bd_in
 #ifdef QTN_SKB_RECYCLE_SUPPORT
 	buff_addr = virt_to_bus(skb->data);
 #else
-	buff_addr = (uint32_t)pci_map_single(vmp->pdev, skb->data,
-				skb_end_pointer(skb) - skb->data, (int)DMA_FROM_DEVICE);
+	{
+		dma_addr_t handle = dma_map_single(&vmp->pdev->dev, skb->data,
+					skb_end_pointer(skb) - skb->data, DMA_FROM_DEVICE);
+
+		if (unlikely(dma_mapping_error(&vmp->pdev->dev, handle))) {
+			dev_kfree_skb(skb);
+			vmp->rx_skb[rx_bd_index] = NULL;
+			vmp->rx_skb_alloc_failures++;
+			return -1;
+		}
+		buff_addr = (uint32_t)handle;
+	}
 #endif
 	rbdp->buff_addr = cpu_to_le32(buff_addr);
 
@@ -927,8 +938,8 @@ vmac_tx_teardown(struct net_device *ndev, qdpc_pcie_bda_t *bda)
 #ifdef QTN_SKB_RECYCLE_SUPPORT
 		vmac_rx_skb_freelist_push(vmp, (dma_addr_t)tbdp->buff_addr, skb);
 #else
-		pci_unmap_single(vmp->pdev, (dma_addr_t)tbdp->buff_addr,
-			skb->len, (int)DMA_TO_DEVICE);
+		dma_unmap_single(&vmp->pdev->dev, (dma_addr_t)tbdp->buff_addr,
+			skb->len, DMA_TO_DEVICE);
 		dev_kfree_skb(skb);
 #endif /* QTN_SKB_RECYCLE_SUPPORT */
 		vmp->tx_skb[i] = NULL;
@@ -1013,7 +1024,7 @@ static int vmac_xmit(struct sk_buff *skb, struct net_device *ndev)
 }
 #endif
 
-void vmac_tx_drop(void *pkt_handle, struct net_device *ndev)
+static void vmac_tx_drop(void *pkt_handle, struct net_device *ndev)
 {
 	struct sk_buff *skb;
 
@@ -1105,12 +1116,24 @@ vmac_tx(void *pkt_handle, struct net_device *ndev)
 	i = vmp->tx_bd_index;
 
 	skb = (struct sk_buff *)pkt_handle;
-	vmp->tx_skb[i] = (struct sk_buff *)pkt_handle;
 #ifdef QTN_SKB_RECYCLE_SUPPORT
 	baddr = (uint32_t)pci_map_single(vmp->pdev, skb->data, skb->len, (int)DMA_BIDIRECTIONAL);
 #else
-	baddr = (uint32_t)pci_map_single(vmp->pdev, skb->data, skb->len, (int)DMA_TO_DEVICE);
+	{
+		dma_addr_t handle = dma_map_single(&vmp->pdev->dev, skb->data, skb->len, DMA_TO_DEVICE);
+
+		if (unlikely(dma_mapping_error(&vmp->pdev->dev, handle))) {
+#ifdef RC_TXDONE_TIMER
+			spin_unlock(&vmp->tx_lock);
 #endif
+			ndev->stats.tx_dropped++;
+			vmac_tx_drop(pkt_handle, ndev);
+			return NETDEV_TX_OK;
+		}
+		baddr = (uint32_t)handle;
+	}
+#endif
+	vmp->tx_skb[i] = skb;
 	len = skb->len;
 	wmb();
 
@@ -1126,11 +1149,7 @@ vmac_tx(void *pkt_handle, struct net_device *ndev)
 
 	vmp->vmac_tx_queue_len++;
 
-#ifdef CONFIG_ARM
-	dump_tx_pkt(vmp, (void *)__bus_to_virt(baddr), len);
-#else
-	dump_tx_pkt(vmp, bus_to_virt(baddr), len);
-#endif
+	dump_tx_pkt(vmp, skb->data, len);
 
 	if (++i >= vmp->tx_bd_num)
 		i = 0;
@@ -1177,7 +1196,7 @@ static irqreturn_t vmac_interrupt(int irq, void *dev_id)
  * The Tx ring has been full longer than the watchdog timeout
  * value. The transmitter must be hung?
  */
-inline static void vmac_tx_timeout(struct net_device *ndev)
+inline static void vmac_tx_timeout(struct net_device *ndev, unsigned int txqueue)
 {
 	printk(KERN_ERR "%s: vmac_tx_timeout: ndev=%p\n", ndev->name, ndev);
 	netif_trans_update(ndev);
@@ -1205,17 +1224,6 @@ static void vmac_tx_buff_cleaner(struct net_device *ndev)
 static int vmac_ioctl(struct net_device *ndev, struct ifreq *rq, int cmd)
 {
 	return -EINVAL;
-}
-
-static void vmac_get_drvinfo(struct net_device *ndev, struct ethtool_drvinfo *info)
-{
-	struct vmac_priv *vmp = netdev_priv(ndev);
-
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	info->fw_version[0] = '\0';
-	sprintf(info->bus_info, "%s %d", DRV_NAME, vmp->mac_id);
-	info->regdump_len = 0;
 }
 
 static const struct net_device_ops vmac_device_ops = {
@@ -1267,11 +1275,15 @@ int vmac_net_init(struct pci_dev *pdev)
 		goto vnet_init_err_0;
 
 
-	if (ethaddr)
-		eth_parse_enetaddr(ethaddr, ndev->dev_addr);
+	if (ethaddr) {
+		uint8_t addr[ETH_ALEN];
+
+		eth_parse_enetaddr(ethaddr, addr);
+		eth_hw_addr_set(ndev, addr);
+	}
 
 	if (!is_valid_ether_addr(ndev->dev_addr))
-		random_ether_addr(ndev->dev_addr);
+		eth_hw_addr_random(ndev);
 
 	ndev->netdev_ops = &vmac_device_ops;
 	ndev->tx_queue_len = QTN_GLOBAL_INIT_EMAC_TX_QUEUE_LEN;
@@ -1299,8 +1311,7 @@ int vmac_net_init(struct pci_dev *pdev)
 		goto vnet_init_err_0;
 	}
 
-	vmp->ep_ipc_reg = (unsigned long)
-		QDPC_BAR_VADDR(vmp->sysctl_bar, TOPAZ_IPC_OFFSET);
+	vmp->ep_ipc_reg = QDPC_BAR_VADDR(vmp->sysctl_bar, TOPAZ_IPC_OFFSET);
 	ndev->irq = pdev->irq;
 
 	ndev->if_port = QDPC_PLATFORM_IFPORT;
@@ -1324,11 +1335,12 @@ int vmac_net_init(struct pci_dev *pdev)
 	__vmac_rx_skb_freelist_refill(vmp);
 #endif
 
+	/* The buffers attached before a failure are freed and unmapped there */
 	if (alloc_and_init_rxbuffers(ndev))
-		goto vnet_init_err_2;
+		goto vnet_init_err_3;
 
 	/* Initialize NAPI */
-	netif_napi_add(ndev, &vmp->napi, vmac_rx_poll, 10);
+	netif_napi_add_weight(ndev, &vmp->napi, vmac_rx_poll, 10);
 
 	/* Register device */
 	if ((err = register_netdev(ndev)) != 0) {
@@ -1438,7 +1450,6 @@ int vmac_net_init(struct pci_dev *pdev)
 
 vnet_init_err_3:
 	free_rx_skbs(vmp);
-vnet_init_err_2:
 #ifdef QTN_SKB_RECYCLE_SUPPORT
 	vmac_rx_skb_freelist_purge(vmp);
 #endif
@@ -1457,8 +1468,13 @@ static void free_rx_skbs(struct vmac_priv *vmp)
 	 */
 	uint16_t i;
 	for (i = 0; i < vmp->rx_bd_num; i++) {
-		if (vmp->rx_skb[i]) {
-			dev_kfree_skb(vmp->rx_skb[i]);
+		struct sk_buff *skb = vmp->rx_skb[i];
+
+		if (skb) {
+			/* As skb2rbd_attach mapped it */
+			dma_unmap_single(&vmp->pdev->dev, le32_to_cpu(vmp->rx_bd_base[i].buff_addr),
+				skb_end_pointer(skb) - skb->data, DMA_FROM_DEVICE);
+			dev_kfree_skb(skb);
 			vmp->rx_skb[i] = 0;
 		}
 	}
@@ -1471,8 +1487,13 @@ static void free_tx_skbs(struct vmac_priv *vmp)
 	 */
 	uint16_t i;
 	for (i = 0; i < vmp->tx_bd_num; i++) {
-		if (vmp->tx_skb[i]) {
-			dev_kfree_skb(vmp->tx_skb[i]);
+		struct sk_buff *skb = vmp->tx_skb[i];
+
+		if (skb) {
+			/* As vmac_tx mapped it */
+			dma_unmap_single(&vmp->pdev->dev, (dma_addr_t)vmp->tx_bd_base[i].buff_addr,
+				skb->len, DMA_TO_DEVICE);
+			dev_kfree_skb(skb);
 			vmp->tx_skb[i] = 0;
 		}
 	}

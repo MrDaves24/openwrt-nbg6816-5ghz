@@ -110,7 +110,7 @@ struct vmac_priv {
 	uint8_t txqueue_stopped;
 	volatile uint32_t *txqueue_wake; /* shared variable with EP */
 	spinlock_t txqueue_op_lock;
-	unsigned long ep_ipc_reg;
+	void __iomem *ep_ipc_reg;
 	uint32_t tx_bd_busy_cnt; /* tx BD unavailable */
 	uint32_t tx_stop_queue_cnt;
 #ifdef RC_TXDONE_TIMER
@@ -154,6 +154,8 @@ struct vmac_priv {
 	uint32_t uncache_len;
 
 	struct task_struct *init_thread; /* Initialization thread */
+	struct task_struct *link_monitor; /* Watches for a reset of the card, once it runs */
+	bool card_running; /* Set when the card has booted */
 	uint8_t msi_enabled; /* PCIe MSI: 1 - Enabled, 0 - Disabled */
 
 	qdpc_bar_t sysctl_bar;

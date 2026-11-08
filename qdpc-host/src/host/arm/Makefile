@@ -2,12 +2,12 @@
 # Makefile for arm platform
 #
 
-EXTRA_CFLAGS	+= -Wall -Wno-deprecated-declarations	\
+ccflags-y	+= -Wall	\
 		   -I$(src)		\
 		   -I$(src)/../../include \
 		   -I$(src)/../common $(DNI_KMOD_CFLAGS)
 
-EXTRA_CFLAGS    += -DQTN_TX_SKBQ_SUPPORT -DQTN_WAKEQ_SUPPORT
+ccflags-y	+= -DQTN_TX_SKBQ_SUPPORT -DQTN_WAKEQ_SUPPORT
 
 PWD	:= $(shell pwd)
 

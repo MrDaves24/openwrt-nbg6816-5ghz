@@ -1,0 +1,15 @@
+# host0, the link to the 5 GHz card, joins the LAN bridge when qdpc-host registers it, about 9 s
+# after loading, and the bridge gets an address in the card's subnet to reach it: the card is
+# 223.254.253.252, as the stock firmware set it.
+dev=$(uci show network | sed -n "s/^network\.\(@device\[[0-9]*\]\)\.name='br-lan'$/\1/p")
+[ -n "$dev" ] || exit 0
+uci -q get "network.$dev.ports" | grep -qw host0 || uci add_list "network.$dev.ports=host0"
+uci -q batch <<EOT
+set network.qtn=interface
+set network.qtn.device=br-lan
+set network.qtn.proto=static
+set network.qtn.ipaddr=223.254.253.251
+set network.qtn.netmask=255.255.255.0
+commit network
+EOT
+exit 0

@@ -29,7 +29,7 @@
 #include <asm/byteorder.h>
 #include <linux/pci.h>
 #include <linux/moduleparam.h>
-#include <linux/pci-dma-compat.h>
+#include <linux/dma-mapping.h>
 #include <linux/module.h>
 
 #include "qdpc_config.h"
@@ -189,7 +189,7 @@ static qdpc_bar_t *qdpc_map_bar(struct vmac_priv *priv, qdpc_bar_t *bar,
 	qdpc_update_hw_bar(priv->pdev, index);
 #endif
 
-	vaddr = ioremap_nocache(busaddr, len);
+	vaddr = ioremap(busaddr, len);
 	if (!vaddr) {
 		printk("Failed to map %u bytes at BAR%u at bus address 0x%p.\n",
 			(uint32_t)len, index, (void *)busaddr);
@@ -228,8 +228,9 @@ static bool qdpc_unmap_bar(struct vmac_priv *priv, qdpc_bar_t *bar)
 static void qdpc_map_epmem(struct vmac_priv *priv)
 {
 	printk("%s() Mapping epmem\n", __FUNCTION__);
-	qdpc_map_bar(priv, &priv->epmem_bar, QDPC_SHMEM_BAR,
-					pci_resource_len(priv->pdev, QDPC_SHMEM_BAR) , 0);
+	if (!qdpc_map_bar(priv, &priv->epmem_bar, QDPC_SHMEM_BAR,
+					pci_resource_len(priv->pdev, QDPC_SHMEM_BAR) , 0))
+		return;
 
 	priv->bda =(qdpc_pcie_bda_t *)QDPC_BAR_VADDR(priv->epmem_bar, 0);
 	priv->bda->bda_rc_msi_enabled = g_msi;
@@ -273,15 +274,9 @@ int32_t qdpc_set_dma_mask(struct vmac_priv *priv) {
 
 	printk("Requested DMA mask:0x%llx\n", dma_mask);
 
-	result = pci_set_dma_mask(priv->pdev, dma_mask);
-	if (!result) {
-			result = pci_set_consistent_dma_mask(priv->pdev, dma_mask);
-			if (result) {
-				printk(" pci_set_consistent_dma_mask() error %d. Mask:0x%llx\n", result, dma_mask);
-				return 1;
-			}
-	} else {
-		printk(" pci_set_dma_mask() error %d. Mask:0x%llx\n", result, dma_mask);
+	result = dma_set_mask_and_coherent(&priv->pdev->dev, dma_mask);
+	if (result) {
+		printk(" dma_set_mask_and_coherent() error %d. Mask:0x%llx\n", result, dma_mask);
 		return 1;
 	}
 
@@ -289,14 +284,19 @@ int32_t qdpc_set_dma_mask(struct vmac_priv *priv) {
 }
 static int32_t qdpc_pcie_init_mem(struct vmac_priv *priv)
 {
-	int ret = 0;
-
 	/* Map SynControl registers and Host to Endpoint interrupt registers to BAR-2 */
 	qdpc_map_sysctl_regs(priv);
 	qdpc_map_epmem(priv);
 	qdpc_map_dma_regs(priv);
 
-	return ret;
+	/* Everything after dereferences the three maps; undo the ones that worked, or the next
+	 * probe fails to request them (qdpc_unmap_bar skips a bar never mapped) */
+	if (!priv->sysctl_bar.b_vaddr || !priv->bda || !priv->dmareg_bar.b_vaddr) {
+		qdpc_unmap_iomem(priv);
+		return -ENOMEM;
+	}
+
+	return 0;
 }
 
 int qdpc_unmap_iomem(struct vmac_priv *priv)
@@ -336,7 +336,7 @@ void *qdpc_map_pciemem(unsigned long busaddr, size_t len)
 			"PCIe memory region starting at 0x%lx\n", (uint32_t)len, busaddr);
 		return NULL;
 	}
-	return ioremap_nocache(busaddr, len);
+	return ioremap(busaddr, len);
 }
 
 void qdpc_unmap_pciemem(unsigned long busaddr, void *vaddr, size_t len)

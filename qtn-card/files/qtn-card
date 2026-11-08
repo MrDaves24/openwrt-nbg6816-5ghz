@@ -1,0 +1,118 @@
+#!/bin/sh
+# The Zyxel NBG6816's 5 GHz card, reached over host0 (nbg6816-5ghz-explained.md):
+#   qtn-card                   its state, no secret printed
+#   qtn-card install           closes the card's root access, now and at each of its boots: the
+#                              card hook on its flash, with a root password you choose, and the
+#                              web UI and WPS off
+#   qtn-card run '<cmd>' [s]   one command line on the card, its output as it comes, for s
+#                              seconds (10 by default). A command that reads the Wi-Fi key
+#                              (get_passphrase, hostapd.conf) prints it.
+# Passwords are asked on the terminal; from a pipe, one per line, in the order they are asked.
+# The card's telnetd runs login. Busybox has no telnet client: nc, as the stock firmware did.
+CARD=223.254.253.252
+PASS=/etc/qtn-card.pass
+HOOK=/usr/share/qtn-card/tweak_qcomm
+
+die() { echo "qtn-card: $*" >&2; exit 1; }
+session() { nc $CARD 23 | tr -d '\r\377\373\375\001\003\037\030'; }
+ping -c 1 -W 2 $CARD >/dev/null || die "the card doesn't answer at $CARD"
+
+# One password, from the terminal without echo, or one line from a pipe
+ask() {
+	if [ -t 0 ]; then
+		printf '%s: ' "$1" >&2
+		read -rs p
+		echo >&2
+	else
+		read -r p
+	fi
+	echo "$p"
+}
+# Whether login asks for a password: the card hook sets one, a card without it has none
+asks() { (sleep 2; echo root; sleep 3) | session | grep -q 'assword:'; }
+cur=
+if asks; then
+	if [ -r $PASS ]; then
+		cur=$(cat $PASS)
+	elif [ "$1" = install ]; then
+		cur=$(ask "The card's current root password")
+	else
+		die "the card asks for a password, and $PASS is missing: run qtn-card install"
+	fi
+fi
+login() { echo root; [ -z "$cur" ] || { sleep 2; echo "$cur"; }; }
+card() { (sleep 2; login; sleep 2; echo "$1"; sleep "${2:-4}"; echo exit) | session; }
+# The output from the marker on: the session's echo before it holds what was typed
+after_marker() { sed -n '/^=M=$/,$p'; }
+# The echo of the command line holds $((6*7)), only a shell that ran it prints 42
+logged_in() { card 'echo =L=$((6*7))' | grep -q '^=L=42'; }
+
+case $1 in
+install)
+	logged_in || die "can't log into the card: a wrong password? (it comes from $PASS when that exists)"
+	new=$(ask "The card's new root password")
+	[ ${#new} -ge 8 ] || die "the password needs 8 characters or more"
+	case $new in *[!\ -~]*) die "the password must be printable ASCII" ;; esac
+	if [ -t 0 ]; then
+		[ "$(ask 'Again')" = "$new" ] || die "the two passwords differ"
+	fi
+	hash=$(echo "$new" | /usr/libexec/qtn-card-crypt) || die "hashing the password failed"
+	# The card's line editor takes a tab for completion and drops it: spaces
+	hook=$(sed -e "s|@HASH@|$hash|" -e "s/$(printf '\t')/ /g" $HOOK)
+	sent=$(printf '%s\n' "$hook" | md5sum | cut -d' ' -f1)
+	# First from the card's RAM, in the background (it waits for the RPC servers): if the new
+	# password didn't work, a reboot would bring the card back as it was
+	out=$(card "cat >/tmp/tweak_qcomm <<'QTN_HOOK_END'
+$hook
+QTN_HOOK_END
+chmod 755 /tmp/tweak_qcomm
+(trap '' HUP; /tmp/tweak_qcomm) >/dev/null 2>&1 &
+echo =M=
+md5sum /tmp/tweak_qcomm" 10 | after_marker)
+	echo "$out" | grep -q "^$sent " || die "the hook the card got isn't the one sent: nothing changed"
+	cur=$new
+	sleep 3
+	logged_in || die "the card doesn't take the new password: nothing written to its flash, and a reboot brings the card back as it was"
+	(umask 077 && echo "$new" >$PASS) || die "writing $PASS failed"
+	# Then on its flash, for every boot
+	out=$(card "cp /tmp/tweak_qcomm /mnt/jffs2/tweak_qcomm
+touch /mnt/jffs2/httpd-disabled
+killall mini_httpd
+call_qcsapi disable_wps wifi0 1
+echo =M=
+md5sum /mnt/jffs2/tweak_qcomm" 6 | after_marker)
+	echo "$out" | grep -q "^$sent " || die "the hook on the card's flash isn't the one sent"
+	echo "The card hook is on the card's flash and running: root's password set, the RPC servers"
+	echo "over TCP stopped, the web UI and WPS off. The password is in $PASS."
+	exit
+	;;
+run)
+	[ -n "$2" ] || die "usage: qtn-card run '<command line>' [seconds]"
+	card "echo =M=
+$2" "${3:-10}" | after_marker
+	exit
+	;;
+?*)
+	die "usage: qtn-card [install | run '<command line>' [seconds]]"
+	;;
+esac
+
+# The state in one session (a login with the password takes seconds). The SSID and the key come
+# back marked, to be compared with the 2.4 GHz network's, never printed. Only named settings are
+# read from the card's flash, which holds the key.
+out=$(card "echo =M=
+for c in get_firmware_version rfstatus 'get_mode wifi0' 'get_channel wifi0' 'get_bw wifi0' \
+    'get_regulatory_region wifi0' 'get_count_assoc wifi0' 'get_wps_state wifi0'; do
+    echo \"\$c: \$(call_qcsapi \$c)\"; done
+echo =S=\$(call_qcsapi get_ssid wifi0)
+echo =K=\$(call_qcsapi get_passphrase wifi0 0)
+netstat -ltun; ifconfig br0 | grep inet
+sed 's/&/ /g' /mnt/jffs2/wireless_conf.txt | while read -r l; do for f in \$l; do
+    case \$f in channel=*|staticip=*|leds=*) echo \$f;; esac; done; done
+ls /mnt/jffs2" 12)
+echo "$out" | after_marker | grep -v -e '^=' -e '^quantenna #' -e '^> '
+[ -n "$cur" ] && echo "login: asks for a password" || echo "login: no password, the card is open"
+# An empty side (no answer, no uci value) is no match
+same() { [ -n "$1" ] && [ "$1" = "$2" ] && echo "$3: the 2.4 GHz network's" || echo "$3: another, or unread"; }
+same "$(echo "$out" | sed -n 's/^=S=//p' | head -1)" "$(uci -q get wireless.default_radio0.ssid)" SSID
+same "$(echo "$out" | sed -n 's/^=K=//p' | head -1)" "$(uci -q get wireless.default_radio0.key)" key
